@@ -1,0 +1,7 @@
+streamlit
+numpy
+sympy
+matplotlib
+scipy
+mpmath
+contourpy
