@@ -1,40 +1,69 @@
-"""MathPlot Studio (Web版) - iPad の Chrome など、タッチ操作のブラウザ向け画面
+"""FreeGraph - 数式グラフ描画 (Streamlit版)。iPad の Chrome など、タッチ操作のブラウザ向け
 
-構成:  app.py (この画面)  →  mathplot_web.py (橋渡し)  →  mathplot_core.py (数式の解析・描画)
+構成:  app.py (この画面) → gesture_view.py (指の操作) / mathplot_web.py (橋渡し) → mathplot_core.py (数式の解析・描画)
 """
+import base64
 import json
 import math
+import os
+import re
 
 import streamlit as st
 
 import mathplot_web as mw
+from gesture_view import graph_view
 
-st.set_page_config(page_title="MathPlot Studio", page_icon="📈", layout="wide",
+HERE = os.path.dirname(os.path.abspath(__file__))
+APP_NAME = "FreeGraph"
+
+
+def load_icon():
+    """同じフォルダに icon.png (jpg / webp / ico も可) があれば、正方形に整えてアイコンとして使う"""
+    for n in ("icon.png", "icon.jpg", "icon.jpeg", "icon.webp", "icon.ico", "icon.gif"):
+        p = os.path.join(HERE, n)
+        if os.path.exists(p):
+            try:
+                from PIL import Image
+                im = Image.open(p).convert("RGBA")
+                w, h = im.size
+                m = min(w, h)
+                im = im.crop(((w - m) // 2, (h - m) // 2, (w - m) // 2 + m, (h - m) // 2 + m)).resize((256, 256))
+                return im
+            except Exception:
+                pass
+    return None
+
+
+ICON = load_icon()
+st.set_page_config(page_title=APP_NAME, page_icon=ICON if ICON is not None else "📈", layout="wide",
                    initial_sidebar_state="collapsed")
 
-# ======================= タッチ操作向けの見た目 =======================
+# ======================= 見た目: 元のデスクトップ版に近いシンプルな配色・形 =======================
 st.markdown("""
 <style>
-/* 余白を詰めて画面を広く使う */
-.block-container {padding: 2.6rem 0.9rem 3rem 0.9rem; max-width: 100%;}
-/* iPad(Safari系)は文字サイズが16px未満の入力欄をタップすると勝手に拡大するので、16px以上にする */
+.stApp {background: #f0f0f0;}
+.block-container {padding: 2.2rem 0.8rem 2rem 0.8rem; max-width: 100%;}
+header[data-testid="stHeader"] {background: transparent;}
+/* iPadは文字が16px未満の入力欄をタップすると勝手に拡大するので 17px にする */
 input, textarea, select, [data-baseweb="select"] * {font-size: 17px !important;}
-/* ボタンは指で押しやすい大きさに。ダブルタップでの拡大も防ぐ */
+/* ボタン: 角を小さく、淡い灰色。指で押しやすい高さ。ダブルタップ拡大を防ぐ */
 .stButton button, .stDownloadButton button, [data-testid="stPopover"] button {
-    min-height: 46px; min-width: 46px; touch-action: manipulation;}
-/* スライダーのつまみを大きく */
-[data-testid="stSlider"] [role="slider"] {width: 30px !important; height: 30px !important;}
-[data-testid="stSlider"] {padding-top: 0.2rem; padding-bottom: 0.4rem;}
-/* キーパッド・操作ボタンは横一列のまま折り返さない (画面が狭くても崩れない) */
-.st-key-keypad [data-testid="stHorizontalBlock"], .st-key-viewbtns [data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important; gap: 0.25rem !important;}
-.st-key-keypad [data-testid="stColumn"], .st-key-viewbtns [data-testid="stColumn"],
-.st-key-keypad [data-testid="column"], .st-key-viewbtns [data-testid="column"] {
+    min-height: 44px; min-width: 44px; touch-action: manipulation; border-radius: 4px;
+    background: #fdfdfd; border: 1px solid #c8c8c8; color: #222;}
+/* 式のカード・キーパッドの枠: 白 + 細い灰色の枠 */
+[data-testid="stVerticalBlockBorderWrapper"] {background: #fafafa; border-radius: 4px; border-color: #b8b8b8;}
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input {border-radius: 2px;}
+[data-testid="stSlider"] [role="slider"] {width: 28px !important; height: 28px !important;}
+[data-testid="stSlider"] {padding-top: .1rem; padding-bottom: .3rem;}
+[data-testid="stExpander"] {background: #fafafa; border-radius: 4px;}
+/* キーパッド・ツールバーは折り返さず横一列 (画面が狭くても崩れない) */
+.st-key-keypad [data-testid="stHorizontalBlock"], .st-key-toolbar [data-testid="stHorizontalBlock"],
+.st-key-kpnav [data-testid="stHorizontalBlock"] {flex-wrap: nowrap !important; gap: .25rem !important;}
+.st-key-keypad [data-testid="stColumn"], .st-key-toolbar [data-testid="stColumn"], .st-key-kpnav [data-testid="stColumn"],
+.st-key-keypad [data-testid="column"], .st-key-toolbar [data-testid="column"], .st-key-kpnav [data-testid="column"] {
     min-width: 0 !important; flex: 1 1 0 !important; width: auto !important;}
-.st-key-keypad button, .st-key-viewbtns button {width: 100%; padding: 0 !important; font-size: 17px;}
-/* グラフ画像は欄の幅いっぱいに */
-[data-testid="stImage"] img {width: 100% !important; height: auto !important;}
-h3 {margin: 0 0 0.3rem 0; padding: 0;}
+.st-key-keypad button, .st-key-toolbar button, .st-key-kpnav button {width: 100%; padding: 0 !important; font-size: 17px;}
+h3 {margin: 0; padding: 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -57,6 +86,15 @@ except Exception:
     pass
 
 ss = st.session_state
+
+
+def is_phone():
+    """スマホ(iPhone / Androidスマホ)ならTrue。iPad・Androidタブレット・PCはFalse"""
+    try:
+        ua = str(st.context.headers.get("User-Agent", ""))
+    except Exception:
+        return False
+    return bool(re.search(r"iPhone|iPod|Android.*Mobile|Windows Phone", ua))
 
 
 # ======================= 状態の管理 =======================
@@ -90,12 +128,15 @@ def init():
     ss.space = ss.space_sel = mw.SPACE_NAMES[0]
     ss.rows, ss.params, ss.next_id, ss.next_pid, ss.active = [], [], 0, 0, None
     add_param("t", "real", "0", "2π", 0.0, fixed=True)
-    add_row(mw.EXAMPLES[ss.space])
+    add_row("")                                   # 最初は空の入力欄が1つ
     for i in range(6):
         ss[f"lim{i}"] = -5.0 if i % 2 == 0 else 5.0
     ss.equal, ss.consts, ss.axp = True, "", "t"
-    ss.elev, ss.azim, ss.hfac = 25, -60, 0.9
-    ss.layout = "横並び"
+    ss.elev, ss.azim, ss.hfac = 25.0, -60.0, 0.9
+    ss.touch = True
+    ss.layout = "縦並び" if is_phone() else "横並び"      # スマホは縦並び、iPad/PCは横並び
+    ss.kp_base, ss.kp_msg = mw.load_keypages()
+    ss.kp_custom = False
 
 
 def reset_lim():
@@ -107,8 +148,9 @@ def on_space():
     ss.space = ss.space_sel
     ss.rows = []
     reset_lim()
-    add_row(mw.EXAMPLES[ss.space])
+    add_row("")                                   # 別のグラフに変えたら空の入力欄1つ
     ss.equal = True
+    ss.elev, ss.azim = 25.0, -60.0
 
 
 def get_state():
@@ -128,7 +170,14 @@ def get_state():
             lim[2 * i], lim[2 * i + 1] = -5.0, 5.0
     return dict(space=ss.space, rows=rows, params=params, consts=ss.get("consts", ""), lim=lim,
                 equal=bool(ss.get("equal", True)), axp=ss.get("axp", "t"),
-                elev=float(ss.get("elev", 25)), azim=float(ss.get("azim", -60)))
+                elev=float(ss.get("elev", 25.0)), azim=float(ss.get("azim", -60.0)))
+
+
+def get_state_for_save():
+    s = get_state()
+    return dict(space=s["space"], lim=s["lim"], equal=s["equal"], consts=s["consts"], axp=s["axp"],
+                params=[dict(name=p["name"], kind=p["kind"], lo=p["lo"], hi=p["hi"], val=p["val"], fixed=p["fixed"]) for p in s["params"]],
+                rows=s["rows"])
 
 
 def apply_dict(d):
@@ -160,9 +209,9 @@ def apply_dict(d):
 # --- ボタンから呼ばれる処理 (コールバック: 画面の再描画より前に実行される) ---
 def set_active(rid): ss.active = rid
 def rm_row(rid): ss.rows = [r for r in ss.rows if r["id"] != rid]
-
-
-def rm_param(pid): ss.params = [p for p in ss.params if p["id"] != pid]
+def mark_full(): ss._need_full = True              # 式の入力欄にも関わる変更 → 画面全体を作り直す
+def rm_param(pid): ss.params = [p for p in ss.params if p["id"] != pid]; mark_full()
+def add_param_cb(): add_param(); mark_full()
 
 
 def target_row():
@@ -189,119 +238,130 @@ def kp_action(name):
         ss[f"expr_{rid}"] = ""
 
 
-def view_move(kind):
-    """ズーム・移動ボタン (マウスのホイール/ドラッグの代わり)"""
+def kp_flip(step):
+    names = [p["name"] for p in mw.keypages(ss.kp_base, ["t"])]
+    cur = names.index(ss.kp_page) if ss.get("kp_page") in names else 0
+    ss.kp_page = names[(cur + step) % len(names)]
+
+
+def kp_reset_file():
+    ss.kp_base, ss.kp_msg = mw.load_keypages()
+    ss.kp_custom = False
+    ss._kp_first = True
+
+
+def view_shift(direction):
+    """左右への移動ボタン (2D・3Dどちらも)"""
+    lo, hi = float(ss["lim0"]), float(ss["lim1"])
+    d = (hi - lo) * 0.25 * direction
+    ss["lim0"], ss["lim1"] = lo + d, hi + d
+
+
+def view_rot_reset():
+    ss.elev, ss.azim = 25.0, -60.0
+    reset_lim()
+
+
+def handle_gesture():
+    """指の操作 (ドラッグ・ピンチ・回転) を軸範囲・視点に反映する。グラフを描く前に呼ぶ"""
+    g = ss.get("gesture")
+    if not isinstance(g, dict) or g.get("id") == ss.get("_gid"):
+        return
+    ss._gid = g.get("id")
     S = mw.SPACES[ss.space]
     n = 2 if S["dim"] == 2 or S.get("tz") else 3
-    for i in range(n):
-        lo, hi = float(ss[f"lim{2 * i}"]), float(ss[f"lim{2 * i + 1}"])
-        c, w = (lo + hi) / 2, hi - lo
-        if kind in ("in", "out"):
-            f = 0.8 if kind == "in" else 1.25
-            lo, hi = c - w * f / 2, c + w * f / 2
+    try:
+        if g["type"] == "rot" and S["dim"] == 3:
+            ss.azim = (float(ss.get("azim", -60.0)) - float(g["dx"]) * 240.0 + 180.0) % 360.0 - 180.0
+            ss.elev = max(-90.0, min(90.0, float(ss.get("elev", 25.0)) - float(g["dy"]) * 240.0))
+            return
+        if g["type"] == "view" and S["dim"] == 2:
+            base = ss.get("_eff") or [float(ss[f"lim{i}"]) for i in range(6)]
+            new = mw.view_transform_2d(base, g["s"], float(g["tx"]), float(g["ty"]))
+        elif g["type"] in ("zoom", "view"):
+            new = mw.zoom_lims([float(ss[f"lim{i}"]) for i in range(6)], g["s"], n)
         else:
-            d = {"left": (-1, 0), "right": (1, 0), "up": (0, 1), "down": (0, -1)}[kind][i] if i < 2 else 0
-            lo, hi = lo + d * w * 0.25, hi + d * w * 0.25
-        ss[f"lim{2 * i}"], ss[f"lim{2 * i + 1}"] = lo, hi
+            return
+        for i in range(2 * n):
+            ss[f"lim{i}"] = float(new[i])
+    except Exception:
+        pass
 
 
-def view_rot(de, da):
-    ss.elev = max(-90, min(90, int(ss.get("elev", 25)) + de))
-    a = int(ss.get("azim", -60)) + da
-    ss.azim = (a + 180) % 360 - 180
-
-
-# ======================= 画面の部品 =======================
-def row_editor(names, previews):
+# ======================= 左: 式の入力 =======================
+def row_editor(previews):
     for idx, r in enumerate(ss.rows):
         rid = r["id"]
-        c1, c2, c3, c4 = st.columns([1, 7, 1.3, 1.3], vertical_alignment="center")
-        c1.checkbox("表示", key=f"on_{rid}", label_visibility="collapsed")
-        c2.text_input(f"式 {idx + 1}", key=f"expr_{rid}", label_visibility="collapsed", placeholder="式を入力  例: sin(x)")
-        c3.button("●" if ss.active == rid else "✎", key=f"sel_{rid}", on_click=set_active, args=(rid,),
-                  help="キーパッドの入力先にする")
-        c4.button("✕", key=f"rm_{rid}", on_click=rm_row, args=(rid,), help="この式を削除")
-        tex, err = previews[idx] if idx < len(previews) else (None, None)
-        d1, d2, d3 = st.columns([1, 7, 2.6], vertical_alignment="center")
-        d1.markdown(f"<span style='color:{ss.get(f'col_{rid}', '#999')};font-size:24px'>■</span>", unsafe_allow_html=True)
-        with d2:
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([1, 7, 1.2, 1.2], vertical_alignment="center")
+            c1.checkbox("表示", key=f"on_{rid}", label_visibility="collapsed")
+            c2.text_input(f"式 {idx + 1}", key=f"expr_{rid}", label_visibility="collapsed", placeholder="式を入力")
+            c3.button("●" if ss.active == rid else "○", key=f"sel_{rid}", on_click=set_active, args=(rid,),
+                      help="キーパッドの入力先にする (●が入力先)")
+            c4.button("✕", key=f"rm_{rid}", on_click=rm_row, args=(rid,), help="この式を削除")
+            tex, err = previews[idx] if idx < len(previews) else (None, None)
             if err:
                 st.caption(f":red[{err}]")
             elif tex:
                 st.latex(tex)
-        with d3.popover("色・太さ"):
-            st.color_picker("色", key=f"col_{rid}")
-            st.slider("太さ", 0.5, 12.0, step=0.5, key=f"lw_{rid}")
-    st.button("＋ 式を追加", on_click=kp_action, args=("new",))
+            d1, d2, d3 = st.columns([2, 3, 4], vertical_alignment="center")
+            with d1.popover("色"):
+                st.color_picker("色", key=f"col_{rid}")
+            d2.number_input("太さ", 0.5, 12.0, step=0.5, format="%.2f", key=f"lw_{rid}")
+            d3.markdown(f"<span style='color:{ss.get(f'col_{rid}', '#999')};font-size:26px'>━━</span>", unsafe_allow_html=True)
+    st.button("＋ 式を追加", key="add_row", on_click=kp_action, args=("new",))
 
 
 def keypad(names):
-    pages = mw.keypages(names)
-    with st.container(key="keypad"):
-        st.selectbox("キーパッドのページ", [p["name"] for p in pages], key="kp_page", label_visibility="collapsed")
-        page = next((p for p in pages if p["name"] == ss.kp_page), pages[0])
+    pages = mw.keypages(ss.kp_base, names)
+    pnames = [p["name"] for p in pages]
+    if ss.pop("_kp_first", False) or ss.get("kp_page") not in pnames:
+        ss.kp_page = pnames[0]                      # (部品を作る前なので書き換えてよい)
+    with st.container(border=True, key="keypad"):
+        with st.container(key="kpnav"):
+            n1, n2, n3, n4 = st.columns([1, 5, 1, 1], vertical_alignment="center")
+            n1.button("◀", key="kp_prev", on_click=kp_flip, args=(-1,), help="前のページ")
+            n2.selectbox("キーパッドのページ", pnames, key="kp_page", label_visibility="collapsed")
+            n3.button("▶", key="kp_next", on_click=kp_flip, args=(1,), help="次のページ")
+            with n4.popover("⚙"):
+                st.caption(("セッション中に読み込んだ設定を使用中" if ss.kp_custom else ss.kp_msg))
+                up = st.file_uploader("キー設定JSON (mathplot_studio_keys.json) を読み込む", type=["json"], key="kp_upload")
+                if up is not None and ss.get("_kp_sig") != (up.name, up.size):
+                    ss._kp_sig = (up.name, up.size)
+                    try:
+                        ss.kp_base = mw.parse_keypages(json.loads(up.getvalue().decode("utf-8")))
+                        ss.kp_custom = True
+                        ss._kp_first = True
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"読み込めませんでした: {ex}")
+                st.button("ファイルの設定に戻す", key="kp_reset", on_click=kp_reset_file)
+                st.caption("リポジトリに mathplot_studio_keys.json を置くと、全員の初期キーパッドになります。")
+        page = next(p for p in pages if p["name"] == ss.kp_page)
+        st.caption(f"ページ {pnames.index(page['name']) + 1} / {len(pnames)}:  **{page['name']}**")
         keys = page["keys"]
         for r0 in range(0, len(keys), 7):
             cols = st.columns(7)
             for j, (lab, txt) in enumerate(keys[r0:r0 + 7]):
-                cols[j].button(lab, key=f"kp_{page['name']}_{r0 + j}", on_click=kp_insert, args=(txt,), help=txt)
+                cols[j].button(lab, key=f"kp_{pnames.index(page['name'])}_{r0 + j}", on_click=kp_insert, args=(txt,), help=txt)
         cols = st.columns(3)
-        cols[0].button("⌫ 1字消す", key="kp_bs", on_click=kp_action, args=("bs",))
+        cols[0].button("⌫", key="kp_bs", on_click=kp_action, args=("bs",), help="1字消す")
         cols[1].button("全消去", key="kp_clear", on_click=kp_action, args=("clear",))
-        cols[2].button("＋ 式", key="kp_new", on_click=kp_action, args=("new",))
-    st.caption("🔹 ✎/● のボタンで入力先の式を選びます。括弧は閉じ忘れても自動で補います。")
-
-
-def param_editor(names):
-    with st.expander("パラメータの追加・設定 (スライダーで動かせる変数)"):
-        for p in ss.params:
-            i = p["id"]
-            c = st.columns([2, 2, 2, 2, 1.2], vertical_alignment="bottom")
-            c[0].text_input("名前", key=f"pname_{i}", disabled=p["fixed"])
-            c[1].selectbox("種類", ["実数", "整数"], key=f"pkind_{i}")
-            c[2].text_input("最小", key=f"plo_{i}")
-            c[3].text_input("最大", key=f"phi_{i}")
-            if not p["fixed"]:
-                c[4].button("✕", key=f"prm_{i}", on_click=rm_param, args=(i,))
-                if str(ss.get(f"pname_{i}", "")).strip() not in names:
-                    st.caption(":red[この名前は使えません (重複・予約語・数字始まりなど)]")
-        st.button("＋ パラメータを追加", on_click=lambda: add_param())
-        st.caption("範囲には π や 2π、sqrt(2) などの式も書けます。")
-
-
-def save_load():
-    with st.expander("保存・読込 (JSON)"):
-        st.download_button("式を保存 (JSON)", data=json.dumps(get_state_for_save(), ensure_ascii=False, indent=1),
-                           file_name="expressions.json", mime="application/json")
-        up = st.file_uploader("保存したJSONを読み込む", type=["json"], key="uploader")
-        if up is not None:
-            sig = (up.name, up.size)
-            if ss.get("_loaded_sig") != sig:
-                ss._loaded_sig = sig
-                try:
-                    d = json.loads(up.getvalue().decode("utf-8"))
-                    ss._pending = d["panels"][0] if "panels" in d else d
-                    st.rerun()
-                except Exception as ex:
-                    st.error(f"読み込めませんでした: {ex}")
-
-
-def get_state_for_save():
-    s = get_state()
-    return dict(space=s["space"], lim=s["lim"], equal=s["equal"], consts=s["consts"], axp=s["axp"],
-                params=[dict(name=p["name"], kind=p["kind"], lo=p["lo"], hi=p["hi"], val=p["val"], fixed=p["fixed"]) for p in s["params"]],
-                rows=s["rows"])
+        cols[2].button("＋式", key="kp_new", on_click=kp_action, args=("new",))
+    st.caption("○/● … キーパッドで入力する式を選びます。閉じ括弧は自動で補います。")
 
 
 def left_panel():
     names, previews = mw.analyze(get_state())
-    row_editor(names, previews)
-    st.text_input("定数 (例: n=2, a=pi/3)", key="consts", placeholder="n=2, a=pi/3")
+    c1, c2 = st.columns([1, 5], vertical_alignment="center")
+    c1.markdown("空間:")
+    c2.selectbox("空間", mw.SPACE_NAMES, key="space_sel", on_change=on_space, label_visibility="collapsed")
+    row_editor(previews)
+    st.text_input("定数", key="consts", placeholder="定数 例: n=2, a=pi/3", label_visibility="collapsed")
     keypad(names)
-    param_editor(names)
-    save_load()
 
 
+# ======================= 右: グラフ =======================
 def clamp_params():
     """スライダーの値を範囲内・正しい型に直す。再生中なら1コマ進める"""
     s = get_state()
@@ -323,45 +383,79 @@ def clamp_params():
             ss[f"pv_{i}"] = float(min(max(v, lo), hi))
 
 
+def toolbar():
+    with st.container(key="toolbar"):
+        c = st.columns([1, 1, 1, 3, 3, 2], vertical_alignment="center")
+        c[0].button("⟲", key="vb_reset", on_click=view_rot_reset, help="表示を元に戻す")
+        c[1].button("◀", key="vb_left", on_click=view_shift, args=(-1,), help="左へ移動")
+        c[2].button("▶", key="vb_right", on_click=view_shift, args=(1,), help="右へ移動")
+        c[3].toggle("指で操作", key="touch", help="オフにすると、グラフの上でもページをスクロールできます")
+        c[4].download_button("式を保存", data=json.dumps(get_state_for_save(), ensure_ascii=False, indent=1),
+                             file_name="expressions.json", mime="application/json", help="式を保存(JSON)")
+        with c[5].popover("読込"):
+            up = st.file_uploader("保存したJSONを読み込む", type=["json"], key="uploader")
+            if up is not None and ss.get("_loaded_sig") != (up.name, up.size):
+                ss._loaded_sig = (up.name, up.size)
+                try:
+                    d = json.loads(up.getvalue().decode("utf-8"))
+                    ss._pending = d["panels"][0] if "panels" in d else d
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"読み込めませんでした: {ex}")
+
+
+def param_bars(state):
+    ok = mw.param_name_ok(state["params"])
+    for p, q, good in zip(ss.params, state["params"], ok):
+        i = p["id"]
+        lo, hi = mw.param_range(q)
+        with st.container(key=f"pbar_{i}"):
+            c = st.columns([1.2, 1.7, 1.3, 5, 1.3, 1.5, 1.2, 0.9], vertical_alignment="center")
+            c[0].text_input("名前", key=f"pname_{i}", disabled=p["fixed"], label_visibility="collapsed", on_change=mark_full)
+            c[1].selectbox("種類", ["実数", "整数"], key=f"pkind_{i}", label_visibility="collapsed")
+            c[2].text_input("最小", key=f"plo_{i}", label_visibility="collapsed")
+            if q["kind"] == "int":
+                a, b = math.ceil(lo), math.floor(hi)
+                b = a + 1 if b <= a else b
+                c[3].slider(q["name"] or "?", a, b, step=1, key=f"pv_{i}", label_visibility="collapsed")
+            else:
+                c[3].slider(q["name"] or "?", float(lo), float(hi), step=float((hi - lo) / 200), format="%.4g",
+                            key=f"pv_{i}", label_visibility="collapsed")
+            c[4].text_input("最大", key=f"phi_{i}", label_visibility="collapsed")
+            c[5].markdown(f"= {float(ss.get(f'pv_{i}', 0)):.4g}")
+            c[6].toggle("▶", key=f"play_{i}", help="自動で動かす")
+            if not p["fixed"]:
+                c[7].button("✕", key=f"prm_{i}", on_click=rm_param, args=(i,), help="このパラメータを削除")
+            if not good:
+                st.caption(":red[この名前は使えません (重複・予約語・数字始まりなど)]")
+    st.button("＋ パラメータ", key="add_param", on_click=add_param_cb)
+
+
 def build_graph(play):
     @st.fragment(run_every=0.5 if play else None)
     def graph():
         S = mw.SPACES[ss.space]
+        dim3 = S["dim"] == 3
+        handle_gesture()                      # 指の操作を先に反映してから描く
         clamp_params()
-        # ---- ズーム・移動 ----
-        with st.container(key="viewbtns"):
-            cols = st.columns(7)
-            for c, (lab, k) in zip(cols, [("＋", "in"), ("－", "out"), ("◀", "left"), ("▶", "right"), ("▲", "up"), ("▼", "down"), ("⟲", "reset")]):
-                if k == "reset":
-                    c.button(lab, key="vb_reset", on_click=reset_lim, help="表示範囲を元に戻す")
-                else:
-                    c.button(lab, key=f"vb_{k}", on_click=view_move, args=(k,), help={"in": "拡大", "out": "縮小"}.get(k, "移動"))
         state = get_state()
+        toolbar()
         # ---- グラフ ----
+        png = None
         try:
-            png, errs, _ = mw.render(state, 8.0, 8.0 * float(ss.get("hfac", 0.9)), 130)
-            st.image(png)
+            png, errs, eff = mw.render(state, 8.0, 8.0 * float(ss.get("hfac", 0.9)), 130)
+            ss._eff = eff
+            ss._rev = ss.get("_rev", 0) + 1
+            graph_view("data:image/png;base64," + base64.b64encode(png).decode(), "3d" if dim3 else "2d",
+                       ss._rev, bool(ss.get("touch", True)), key="gesture")
             for i, e in enumerate(errs):
                 if e:
                     st.caption(f":red[式 {i + 1}: {e}]")
         except Exception as ex:
-            png = None
             st.error(f"描画できませんでした: {ex}")
-        # ---- パラメータのスライダー ----
-        for p, q in zip(ss.params, state["params"]):
-            i = p["id"]
-            lo, hi = mw.param_range(q)
-            nm = q["name"].strip() or "?"
-            c1, c2 = st.columns([8, 2], vertical_alignment="bottom")
-            if q["kind"] == "int":
-                a, b = math.ceil(lo), math.floor(hi)
-                b = a + 1 if b <= a else b
-                c1.slider(nm, a, b, step=1, key=f"pv_{i}")
-            else:
-                c1.slider(nm, float(lo), float(hi), step=float((hi - lo) / 200), format="%.4g", key=f"pv_{i}")
-            c2.toggle("再生", key=f"play_{i}")
-        # ---- 軸・表示 ----
-        with st.expander("軸・表示の設定"):
+        param_bars(state)
+        # ---- 軸・スケール ----
+        with st.expander("軸・スケール"):
             n = 2 if S["dim"] == 2 or S.get("tz") else 3
             for i in range(n):
                 c = st.columns([2, 1, 2], vertical_alignment="center")
@@ -374,20 +468,16 @@ def build_graph(play):
                 if ss.get("axp") not in opts:
                     ss.axp = "t"
                 st.selectbox("第3軸にするパラメータ", opts, key="axp")
-            if S["dim"] == 3:
-                r = st.columns(4)
-                r[0].button("↺ 左", key="rot_l", on_click=view_rot, args=(0, -15))
-                r[1].button("↻ 右", key="rot_r", on_click=view_rot, args=(0, 15))
-                r[2].button("↑ 上", key="rot_u", on_click=view_rot, args=(10, 0))
-                r[3].button("↓ 下", key="rot_d", on_click=view_rot, args=(-10, 0))
-                st.slider("見る角度 (上下)", -90, 90, key="elev")
-                st.slider("見る角度 (回転)", -180, 180, key="azim")
+            if dim3:
+                st.slider("見る角度 (上下)", -90.0, 90.0, step=1.0, format="%.0f", key="elev")
+                st.slider("見る角度 (回転)", -180.0, 180.0, step=1.0, format="%.0f", key="azim")
             st.slider("グラフの縦の長さ", 0.5, 1.3, step=0.05, key="hfac")
             if png is not None and not play:
                 st.download_button("グラフを画像(PNG)で保存", data=png, file_name="graph.png", mime="image/png")
-        # 再生の ON/OFF が切り替わったら、自動更新の設定を作り直すために全体を再実行
+        # 再生の ON/OFF が切り替わった / 式の入力欄にも関わる変更があったときは、全体を再実行
         now = any(ss.get(f"play_{p['id']}") for p in ss.params)
-        if now != ss.get("_decor_play"):
+        need = ss.pop("_need_full", False)
+        if now != ss.get("_decor_play") or need:
             st.rerun()
     return graph
 
@@ -397,11 +487,14 @@ init()
 if ss.get("_pending") is not None:          # JSON読込 (部品が作られる前に状態を差し替える)
     apply_dict(ss.pop("_pending"))
 
-h1, h2, h3 = st.columns([3, 4, 3], vertical_alignment="center")
-h1.markdown("### 📈 MathPlot Studio")
-h2.selectbox("空間", mw.SPACE_NAMES, key="space_sel", on_change=on_space, label_visibility="collapsed")
-h3.radio("レイアウト", ["横並び", "縦並び"], key="layout", horizontal=True, label_visibility="collapsed",
-         help="iPadを縦向きで使うときは「縦並び」(グラフが上、入力が下) が見やすいです")
+if ICON is not None:
+    h0, h1, h2 = st.columns([1, 6, 4], vertical_alignment="center")
+    h0.image(ICON, width=44)
+else:
+    h1, h2 = st.columns([7, 4], vertical_alignment="center")
+h1.markdown(f"### {APP_NAME}")
+h2.radio("レイアウト", ["横並び", "縦並び"], key="layout", horizontal=True, label_visibility="collapsed",
+         help="スマホは縦並び、iPad・PCは横並びが初期設定です")
 
 play = any(ss.get(f"play_{p['id']}") for p in ss.params)
 ss._decor_play = play

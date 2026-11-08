@@ -5,7 +5,7 @@ mathplot_core.py（数式の解析・描画ロジック）を、PySide6(GUI)な�
 """
 import os
 os.environ.setdefault("MPS_NOGUI", "1")      # mathplot_core の GUI(PySide6) 部分を読み込まない
-import io, re, threading
+import io, re, json, threading
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -17,14 +17,7 @@ LOCK = threading.RLock()        # core は共有のグローバル状態を持�
 SPACES = core.SPACES
 SPACE_NAMES = list(SPACES)
 PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2", "#17becf"]
-EXAMPLES = {
-    "xy平面": "sin(x)",
-    "複素数平面": "z^2",
-    "xyz空間": "z = sin(sqrt(x^2 + y^2) - t)",
-    "xy平面 + パラメータ軸t": "y = sin(x - t)",
-    "複素数平面 + パラメータ軸t": "z^2 - exp(i t)",
-    "極座標平面": "1 + cos(th)",
-}
+AX_BOX = (0.055, 0.065, 0.94, 0.93)      # 2Dグラフの描画領域 (図全体に対する 左, 下, 幅, 高さ)
 
 # ---------------- キーパッド ----------------
 DEFAULT_KEYS = [
@@ -50,10 +43,48 @@ DEFAULT_KEYS = [
                                 ["Eₙ", "expint(|,)"], ["K(m)", "ellipk(|)"], ["E(m)", "ellipe(|)"], ["Liₛ", "polylog(|,)"], ["η", "eta(|)"], ["π(x)", "primepi(|)"], ["φ(n)", "totient(|)"], ["mod", " % "]]}]
 
 
-def keypages(param_names):
+KEYS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mathplot_studio_keys.json")
+KEYS_VER = 3
+NEWPAGES = {"行列・ベクトル", "特殊関数"}          # 旧バージョンのキー設定には、新しい既定ページを足す (デスクトップ版と同じ動き)
+
+
+def parse_keypages(raw):
+    """キー設定JSON(デスクトップ版と同じ形式)を検証してページ一覧にする。不正なら ValueError"""
+    data, ver = (raw["pages"], raw.get("v", 1)) if isinstance(raw, dict) else (raw, 1)
+    ok = isinstance(data, list) and data and all(
+        isinstance(p, dict) and isinstance(p.get("name"), str) and isinstance(p.get("keys"), list)
+        and all(isinstance(k, (list, tuple)) and len(k) == 2 and all(isinstance(x, str) for x in k) for k in p["keys"])
+        for p in data)
+    if not ok:
+        raise ValueError("キー設定の形式が正しくありません")
+    data = json.loads(json.dumps(data))
+    if ver < KEYS_VER:
+        have = {p["name"] for p in data}
+        data += [json.loads(json.dumps(p)) for p in DEFAULT_KEYS if p["name"] in NEWPAGES and p["name"] not in have]
+    return data
+
+
+_keys_cache = {}
+
+
+def load_keypages():
+    """mathplot_studio_keys.json があればそれを、無ければ(または壊れていれば)既定のキーパッドを返す。戻り値: (ページ一覧, 説明)"""
+    try:
+        mt = os.path.getmtime(KEYS_FILE)
+    except OSError:
+        return json.loads(json.dumps(DEFAULT_KEYS)), "既定のキーパッド"
+    if _keys_cache.get("mt") != mt:
+        try:
+            with open(KEYS_FILE, encoding="utf-8") as f:
+                _keys_cache.update(mt=mt, pages=parse_keypages(json.load(f)), msg="mathplot_studio_keys.json を使用中")
+        except Exception as ex:
+            _keys_cache.update(mt=mt, pages=json.loads(json.dumps(DEFAULT_KEYS)), msg=f"mathplot_studio_keys.json を読めないため既定を使用中 ({ex})")
+    return _keys_cache["pages"], _keys_cache["msg"]
+
+
+def keypages(base, param_names):
     """キーパッドのページ一覧。末尾に現在のパラメータ用ページを自動追加。"""
-    pages = [p for p in DEFAULT_KEYS]
-    pages = [dict(name=p["name"], keys=[k for k in p["keys"] if k[1] != "(|)/()"]) for p in pages]   # a/b キーは Web では不要
+    pages = [dict(name=p["name"], keys=[k for k in p["keys"] if k[1] != "(|)/()"]) for p in base]   # a/b キー(カーソル位置が必要)は Web では隠す
     return pages + [dict(name="パラメータ", keys=[[n, n] for n in param_names])]
 
 
@@ -145,11 +176,11 @@ def render(state, w_in=8.0, h_in=7.0, dpi=130):
         fig = Figure(figsize=(w_in, h_in), dpi=dpi, facecolor="white")
         W_, H_ = fig.bbox.width, fig.bbox.height
         if dim == 2 and state.get("equal", True):       # 縦横を等倍に
-            w, h = W_ * 0.94, H_ * 0.93
+            w, h = W_ * AX_BOX[2], H_ * AX_BOX[3]
             u = max((L[1] - L[0]) / w, (L[3] - L[2]) / h); cx, cy = (L[0] + L[1]) / 2, (L[2] + L[3]) / 2
             L[:4] = [cx - u * w / 2, cx + u * w / 2, cy - u * h / 2, cy + u * h / 2]
         R = max(abs(v) for v in (L if dim == 3 and not tz else L[:4]))
-        ax = fig.add_axes([0.055, 0.065, 0.94, 0.93] if dim == 2 else [0, 0, 1, 1], projection="3d" if dim == 3 else None)
+        ax = fig.add_axes(list(AX_BOX) if dim == 2 else [0, 0, 1, 1], projection="3d" if dim == 3 else None)
         if dim == 3: getattr(ax, "disable_mouse_rotation", lambda: None)()
         ctx = SimpleNamespace(R=R, t=t, tr=tr, cond="", lw=2.0, maps=[])
         rows = state["rows"]
@@ -187,3 +218,39 @@ def render(state, w_in=8.0, h_in=7.0, dpi=130):
             core.fit3d(ax, fig, L, tuple(v / max(asp) for v in asp), 0.96)
         buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=dpi)
         return buf.getvalue(), errs, L
+
+
+# ---------------- 指の操作 (ジェスチャー) の計算 ----------------
+def view_transform_2d(L, s, tx, ty):
+    """2D: 表示中の画像に「拡大率 s・移動 (tx, ty) [画像の幅/高さに対する割合]」を掛けた見え方になるよう、軸範囲 L=[x0,x1,y0,y1,..] を更新して返す。
+    画像上の点 p は p' = s*p + t へ動く。新しい画面の位置 q には、元の画面の p=(q-t)/s にあったデータが来る。"""
+    s = min(max(float(s), 0.02), 50.0)
+    ax0, ay0, aw, ah = AX_BOX; top = 1 - ay0 - ah
+    x0, x1, y0, y1 = L[:4]; sx, sy = x1 - x0, y1 - y0
+
+    def dx(q): return x0 + (((q - tx) / s - ax0) / aw) * sx
+    def dy(q): return y1 - (((q - ty) / s - top) / ah) * sy
+    nx0, nx1 = dx(ax0), dx(ax0 + aw)
+    ny1, ny0 = dy(top), dy(top + ah)
+    out = list(L); out[:4] = [nx0, nx1, ny0, ny1]
+    return out
+
+
+def zoom_lims(L, s, n):
+    """各軸の中心を固定したまま、拡大率 s で拡大 (s>1) / 縮小 (s<1)。n = 対象の軸の数"""
+    s = min(max(float(s), 0.02), 50.0); out = list(L)
+    for i in range(n):
+        lo, hi = L[2 * i], L[2 * i + 1]; c, w = (lo + hi) / 2, (hi - lo) / s
+        out[2 * i], out[2 * i + 1] = c - w / 2, c + w / 2
+    return out
+
+
+def param_name_ok(params):
+    """各パラメータ名が有効か (重複・予約語・不正な文字がないか)"""
+    seen, out = {"t"}, []
+    for p in params:
+        n = p["name"].strip()
+        ok = bool(p.get("fixed")) or bool(re.fullmatch(r"[^\W\d]\w*", n) and n not in seen and not core.param_reserved(n))
+        if ok: seen.add(n)
+        out.append(ok)
+    return out
