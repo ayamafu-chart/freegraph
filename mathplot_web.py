@@ -5,7 +5,8 @@ mathplot_core.py（数式の解析・描画ロジック）を、PySide6(GUI)な�
 """
 import os
 os.environ.setdefault("MPS_NOGUI", "1")      # mathplot_core の GUI(PySide6) 部分を読み込まない
-import io, re, json, threading
+import io, re, json, hashlib, threading
+from collections import OrderedDict
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -160,10 +161,31 @@ def analyze(state):
 
 
 # ---------------- 描画 ----------------
-def render(state, w_in=8.0, h_in=7.0, dpi=130):
-    """グラフをPNGのバイト列にして返す。戻り値: (png, 行ごとのエラー文字列のリスト, 実際に使った軸範囲)"""
+_geo = {}          # 3D: 直近に描いた図。視点(elev/azim)だけが違うなら、データの計算をやり直さず視点だけ変えて保存する
+
+
+def _save(fig, dpi, jpeg):
+    buf = io.BytesIO()
+    if jpeg: fig.savefig(buf, format="jpeg", dpi=dpi, pil_kwargs={"quality": 72})       # 軽い下書き用
+    else: fig.savefig(buf, format="png", dpi=dpi)
+    return buf.getvalue()
+
+
+def _finish3d(fig, ax, errs, L, asp, state, dpi, jpeg):
+    ax.view_init(state.get("elev", 25), state.get("azim", -60))
+    core.fit3d(ax, fig, L, asp, 0.96)
+    return _save(fig, dpi, jpeg), list(errs), L
+
+
+def _render(state, w_in, h_in, dpi, jpeg):
+    """グラフを画像のバイト列にして返す。戻り値: (画像, 行ごとのエラー文字列のリスト, 実際に使った軸範囲)"""
     with LOCK:
-        S = SPACES[state["space"]]; dim = S["dim"]; tz = S.get("tz")
+        S = SPACES[state["space"]]; dim = S["dim"]; tz = S.get("tz"); gk = None
+        if dim == 3:                                      # 視点以外が同じなら、前回の図を使い回す
+            gk = hashlib.md5(json.dumps([{k: v for k, v in state.items() if k not in ("elev", "azim")}, w_in, h_in],
+                                        sort_keys=True, default=str).encode("utf-8")).hexdigest()
+            if _geo.get("key") == gk:
+                return _finish3d(*_geo["v"], state, dpi, jpeg)
         names, derrs = prepare(state)
         params = state["params"]; allp = ["t"] + names
         tname = state.get("axp", "t") if tz else "t"
@@ -214,10 +236,29 @@ def render(state, w_in=8.0, h_in=7.0, dpi=130):
             ax.set_xlim3d(L[0], L[1]); ax.set_ylim3d(L[2], L[3]); ax.set_zlim3d(L[4], L[5]); core.axes3d(ax, L, lb)
             kx = min(2.2, max(1.0, W_ / max(H_, 1))) ** 0.8
             asp = [L[1] - L[0], L[3] - L[2], L[5] - L[4]] if state.get("equal", True) else [kx, kx, 1]
-            ax.view_init(state.get("elev", 25), state.get("azim", -60))
-            core.fit3d(ax, fig, L, tuple(v / max(asp) for v in asp), 0.96)
-        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=dpi)
-        return buf.getvalue(), errs, L
+            asp = tuple(v / max(asp) for v in asp)
+            _geo.clear(); _geo.update(key=gk, v=(fig, ax, errs, L, asp))
+            return _finish3d(fig, ax, errs, L, asp, state, dpi, jpeg)
+        return _save(fig, dpi, jpeg), errs, L
+
+
+_memo = OrderedDict()          # 直近の描画結果。同じ内容の再描画を省く (画面の再実行のたびに描き直さないため)
+
+
+def render(state, w_in=8.0, h_in=7.0, dpi=130, draft=False):
+    """グラフを描く。draft=True なら回転中・再生中向けの軽い画像 (低解像度のJPEG)。
+    戻り値: (画像バイト列, 行ごとのエラー, 実際に使った軸範囲, 画像の種類 "png"/"jpeg", 内容を表すキー)"""
+    jpeg = bool(draft)
+    if draft: dpi = min(dpi, 72)
+    key = hashlib.md5(json.dumps([state, w_in, h_in, dpi, jpeg], sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    with LOCK:
+        if key in _memo:
+            _memo.move_to_end(key); r = _memo[key]
+        else:
+            r = _render(state, w_in, h_in, dpi, jpeg)
+            _memo[key] = r
+            while len(_memo) > 6: _memo.popitem(last=False)
+    return r[0], r[1], r[2], ("jpeg" if jpeg else "png"), key
 
 
 # ---------------- 指の操作 (ジェスチャー) の計算 ----------------
@@ -253,4 +294,14 @@ def param_name_ok(params):
         ok = bool(p.get("fixed")) or bool(re.fullmatch(r"[^\W\d]\w*", n) and n not in seen and not core.param_reserved(n))
         if ok: seen.add(n)
         out.append(ok)
+    return out
+
+
+def view_shift_3d(L, azim, side, fwd):
+    """3D: 今向いている方向を基準に、描画範囲を動かす。side: +1 右 / -1 左、fwd: +1 奥 / -1 手前 (1回で範囲の25%)。
+    画面の「右」は (-sin a, cos a)、「奥」は (-cos a, -sin a) (a = 方位角)"""
+    a = np.radians(float(azim)); rx, ry = -np.sin(a), np.cos(a); fx, fy = -np.cos(a), -np.sin(a)
+    sx, sy = L[1] - L[0], L[3] - L[2]
+    dx = (side * rx + fwd * fx) * 0.25 * sx; dy = (side * ry + fwd * fy) * 0.25 * sy
+    out = list(L); out[0] += dx; out[1] += dx; out[2] += dy; out[3] += dy
     return out

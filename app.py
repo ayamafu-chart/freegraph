@@ -250,11 +250,16 @@ def kp_reset_file():
     ss._kp_first = True
 
 
-def view_shift(direction):
-    """左右への移動ボタン (2D・3Dどちらも)"""
-    lo, hi = float(ss["lim0"]), float(ss["lim1"])
-    d = (hi - lo) * 0.25 * direction
-    ss["lim0"], ss["lim1"] = lo + d, hi + d
+def view_shift(side, fwd=0):
+    """移動ボタン。2D: 左右。3D: 今向いている方向を基準にした 左右 / 奥・手前"""
+    if mw.SPACES[ss.space]["dim"] == 3:
+        new = mw.view_shift_3d([float(ss[f"lim{i}"]) for i in range(6)], float(ss.get("azim", -60.0)), side, fwd)
+    else:
+        lo, hi = float(ss["lim0"]), float(ss["lim1"])
+        d = (hi - lo) * 0.25 * side
+        new = [lo + d, hi + d]
+    for i in range(len(new)):
+        ss[f"lim{i}"] = float(new[i]) if i < 4 else ss[f"lim{i}"]
 
 
 def view_rot_reset():
@@ -268,6 +273,7 @@ def handle_gesture():
     if not isinstance(g, dict) or g.get("id") == ss.get("_gid"):
         return
     ss._gid = g.get("id")
+    ss._draft = (g.get("type") == "rot")      # 回転の最中だけ軽い画像で描く (止まると settle が来て高画質に戻る)
     S = mw.SPACES[ss.space]
     n = 2 if S["dim"] == 2 or S.get("tz") else 3
     try:
@@ -280,7 +286,7 @@ def handle_gesture():
             new = mw.view_transform_2d(base, g["s"], float(g["tx"]), float(g["ty"]))
         elif g["type"] in ("zoom", "view"):
             new = mw.zoom_lims([float(ss[f"lim{i}"]) for i in range(6)], g["s"], n)
-        else:
+        else:                                   # settle など
             return
         for i in range(2 * n):
             ss[f"lim{i}"] = float(new[i])
@@ -383,16 +389,22 @@ def clamp_params():
             ss[f"pv_{i}"] = float(min(max(v, lo), hi))
 
 
-def toolbar():
+def toolbar(dim3):
     with st.container(key="toolbar"):
-        c = st.columns([1, 1, 1, 3, 3, 2], vertical_alignment="center")
+        c = st.columns([1, 1, 1, 1, 1, 3, 3, 2] if dim3 else [1, 1, 1, 3, 3, 2], vertical_alignment="center")
         c[0].button("⟲", key="vb_reset", on_click=view_rot_reset, help="表示を元に戻す")
-        c[1].button("◀", key="vb_left", on_click=view_shift, args=(-1,), help="左へ移動")
-        c[2].button("▶", key="vb_right", on_click=view_shift, args=(1,), help="右へ移動")
-        c[3].toggle("指で操作", key="touch", help="オフにすると、グラフの上でもページをスクロールできます")
-        c[4].download_button("式を保存", data=json.dumps(get_state_for_save(), ensure_ascii=False, indent=1),
-                             file_name="expressions.json", mime="application/json", help="式を保存(JSON)")
-        with c[5].popover("読込"):
+        if dim3:                                    # 3D: 今向いている方向を基準に移動
+            c[1].button("◀", key="vb_left", on_click=view_shift, args=(-1, 0), help="左へ移動 (今向いている方向の左)")
+            c[2].button("▶", key="vb_right", on_click=view_shift, args=(1, 0), help="右へ移動 (今向いている方向の右)")
+            c[3].button("▲", key="vb_fwd", on_click=view_shift, args=(0, 1), help="奥へ移動")
+            c[4].button("▼", key="vb_back", on_click=view_shift, args=(0, -1), help="手前へ移動")
+        else:
+            c[1].button("◀", key="vb_left", on_click=view_shift, args=(-1,), help="左へ移動")
+            c[2].button("▶", key="vb_right", on_click=view_shift, args=(1,), help="右へ移動")
+        c[-3].toggle("指で操作", key="touch", help="オフにすると、グラフの上でもページをスクロールできます")
+        c[-2].download_button("式を保存", data=json.dumps(get_state_for_save(), ensure_ascii=False, indent=1),
+                              file_name="expressions.json", mime="application/json", help="式を保存(JSON)")
+        with c[-1].popover("読込"):
             up = st.file_uploader("保存したJSONを読み込む", type=["json"], key="uploader")
             if up is not None and ss.get("_loaded_sig") != (up.name, up.size):
                 ss._loaded_sig = (up.name, up.size)
@@ -439,15 +451,17 @@ def build_graph(play):
         handle_gesture()                      # 指の操作を先に反映してから描く
         clamp_params()
         state = get_state()
-        toolbar()
+        toolbar(dim3)
         # ---- グラフ ----
         png = None
+        draft = bool(ss.pop("_draft", False)) or play     # 回転中・再生中は軽い画像
         try:
-            png, errs, eff = mw.render(state, 8.0, 8.0 * float(ss.get("hfac", 0.9)), 130)
+            img, errs, eff, kind, ikey = mw.render(state, 8.0, 8.0 * float(ss.get("hfac", 0.9)), 130, draft)
+            png = None if kind == "jpeg" else img
             ss._eff = eff
-            ss._rev = ss.get("_rev", 0) + 1
-            graph_view("data:image/png;base64," + base64.b64encode(png).decode(), "3d" if dim3 else "2d",
-                       ss._rev, bool(ss.get("touch", True)), key="gesture")
+            # rev は内容が同じなら同じ値 → 画像を送り直さずに済む
+            graph_view(f"data:image/{kind};base64," + base64.b64encode(img).decode(), "3d" if dim3 else "2d",
+                       ikey, bool(ss.get("touch", True)), key="gesture")
             for i, e in enumerate(errs):
                 if e:
                     st.caption(f":red[式 {i + 1}: {e}]")
@@ -472,7 +486,7 @@ def build_graph(play):
                 st.slider("見る角度 (上下)", -90.0, 90.0, step=1.0, format="%.0f", key="elev")
                 st.slider("見る角度 (回転)", -180.0, 180.0, step=1.0, format="%.0f", key="azim")
             st.slider("グラフの縦の長さ", 0.5, 1.3, step=0.05, key="hfac")
-            if png is not None and not play:
+            if png is not None:
                 st.download_button("グラフを画像(PNG)で保存", data=png, file_name="graph.png", mime="image/png")
         # 再生の ON/OFF が切り替わった / 式の入力欄にも関わる変更があったときは、全体を再実行
         now = any(ss.get(f"play_{p['id']}") for p in ss.params)

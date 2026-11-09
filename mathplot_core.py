@@ -364,12 +364,44 @@ def compile_expr(src):
     return _cache[key]
 
 
+def _nderiv(expr):
+    """diff(...) で sympy が導関数の式を作れず Derivative のまま残ったもの (ζ(x) など) を、数値微分 (5点公式) に置き換える。
+    定義できる範囲 (例: ζ(x) なら x>1 など) では微分でき、定義できない点は nan になる"""
+    mods = {}
+    for i, D in enumerate(sorted(expr.atoms(sp.Derivative), key=sp.default_sort_key)):
+        steps = []
+        for v_, n_ in D.variable_count:
+            if v_ not in SYMS: raise ValueError("未定義の記号: " + str(v_))
+            if n_ > 3: raise ValueError("数値微分は3階までです")
+            steps += [SYMS.index(v_)] * int(n_)
+        f = lam(D.expr)                                  # 微分される式 (さらに入れ子の微分があってもよい)
+
+        def mk(g, idx, order):
+            h0 = 1e-3 * 10 ** (0.5 * (order - 1))          # 階数が高いほど刻み幅を大きく (丸め誤差対策)
+
+            def d(*a):
+                a = [np.asarray(q) for q in a]; x = a[idx]
+                h = h0 * np.maximum(1.0, np.abs(x))
+                def F(xx):
+                    b = list(a); b[idx] = xx; return g(*b)
+                return (F(x - 2 * h) - 8 * F(x - h) + 8 * F(x + h) - F(x + 2 * h)) / (12 * h)
+            return d
+
+        g = f
+        for k, idx in enumerate(steps, 1):                 # 高階微分は1階の数値微分を重ねる
+            g = mk(g, idx, len(steps))
+        name = f"_ND{i}"; mods[name] = lambda *a, g=g: g(*a)
+        expr = expr.xreplace({D: sp.Function(name)(*SYMS)})
+    return expr, mods
+
+
 def lam(expr):
     key = (expr, tuple(NAMES))
     if key not in _lc:
         bad = sorted(str(q) for q in expr.free_symbols if q not in SYMS)   # 未定義の記号で巨大な記号計算に入るのを防ぐ
         if bad: raise ValueError("未定義の記号: " + ", ".join(bad))
         e2, mods = _quad(_use_fast(expr)); mods["LogB"] = lambda x, b: np.log(x) / np.log(b)
+        e2, m2 = _nderiv(e2); mods.update(m2)
         mods.update(_zeta=zeta_np, _gamma=gamma_np, _lgamma=lgamma_np)
         try: f = sp.lambdify(SYMS, e2, modules=[mods, "scipy", "numpy", FALLBACK])
         except Exception: f = sp.lambdify(SYMS, e2, modules=[mods, "numpy", FALLBACK])

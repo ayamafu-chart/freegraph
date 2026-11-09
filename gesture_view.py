@@ -7,6 +7,7 @@ Python へ返す値 (どれも {"id": 重複しない文字列, ...}):
   {"type": "view", "s": 拡大率, "tx": 横移動(画像の幅に対する割合), "ty": 縦移動(画像の高さに対する割合)}   2D: ドラッグ/ピンチ
   {"type": "zoom", "s": 拡大率}                                                                  3D: ピンチ
   {"type": "rot",  "dx": 横移動(画像の幅に対する割合), "dy": 縦移動(同)}                          3D: 1本指ドラッグ (操作中も少しずつ送る)
+  {"type": "settle"}                                                                             3D: 回転が止まった (高画質に描き直してほしい)
 """
 import os
 import tempfile
@@ -34,7 +35,7 @@ _HTML = r"""<!doctype html>
   var args = {mode: '2d', enabled: true}, lastRev = null, waiting = false, waitTimer = null;
   var M = {s: 1, tx: 0, ty: 0};            // 表示中の画像にかけている変換: p' = s*p + t (ピクセル)
   var pts = {};                            // 押されている指 {pointerId: {x, y}}
-  var base = null, startPts = null, pinched = false, rotLast = null, seq = 0, wheelTimer = null;
+  var base = null, startPts = null, pinched = false, rotLast = null, seq = 0, wheelTimer = null, rotDirty = false, settleTimer = null;
 
   function post(type, data) {
     var m = {isStreamlitMessage: true, type: type};
@@ -84,6 +85,16 @@ _HTML = r"""<!doctype html>
     else send({type: 'view', s: M.s, tx: M.tx / r.width, ty: M.ty / r.height});
   }
 
+  // 回転が止まって少し経ったら「高画質に描き直して」と頼む (回転中は軽い画像で追従する)
+  function scheduleSettle() {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(function () {
+      if (!rotDirty) return;
+      if (count() > 0 || waiting) { scheduleSettle(); return; }
+      rotDirty = false; send({type: 'settle'}, true);
+    }, 400);
+  }
+
   // 3D: 1本指ドラッグで回転。サーバーの描画が終わるたびに、それまでの動き分を送る (操作中も絵が追従する)
   function rotMove() {
     if (waiting || !rotLast) return;
@@ -93,6 +104,7 @@ _HTML = r"""<!doctype html>
     var w = wrap.getBoundingClientRect().width;
     rotLast = {x: cur.x, y: cur.y};
     send({type: 'rot', dx: dx / w, dy: dy / w}, true);
+    rotDirty = true; scheduleSettle();
   }
 
   wrap.addEventListener('pointerdown', function (e) {
@@ -114,7 +126,7 @@ _HTML = r"""<!doctype html>
     var was3dRot = (args.mode === '3d' && !pinched);
     delete pts[e.pointerId];
     if (count() > 0) { rebase(); return; }          // まだ指が残っている → 基準を取り直して続ける
-    if (was3dRot) return;
+    if (was3dRot) { scheduleSettle(); return; }
     commitView();
   }
   wrap.addEventListener('pointerup', up);
@@ -135,7 +147,10 @@ _HTML = r"""<!doctype html>
   function onRender(a) {
     args = a || args;
     wrap.style.touchAction = args.enabled ? 'none' : 'pan-y';
-    if (args.rev === lastRev && img.src && img.getAttribute('data-has') === '1') return;
+    if (args.rev === lastRev && img.getAttribute('data-has') === '1') {
+      if (waiting) { setWait(false); resetT(); }          // 画像が変わらなかった場合も、応答が来たので待ちを解く
+      return;
+    }
     lastRev = args.rev;
     var ni = new Image();
     ni.onload = function () {
