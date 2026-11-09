@@ -456,7 +456,7 @@ def build_graph(play):
         png = None
         draft = bool(ss.pop("_draft", False)) or play     # 回転中・再生中は軽い画像
         try:
-            img, errs, eff, kind, ikey = mw.render(state, 8.0, 8.0 * float(ss.get("hfac", 0.9)), 130)
+            img, errs, eff, kind, ikey = mw.render(state, 8.0, 8.0 * float(ss.get("hfac", 0.9)), 130, draft)
             png = None if kind == "jpeg" else img
             ss._eff = eff
             # rev は内容が同じなら同じ値 → 画像を送り直さずに済む
