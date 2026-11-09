@@ -11,6 +11,7 @@ import re
 import streamlit as st
 
 import mathplot_web as mw
+import gesture_view
 from gesture_view import graph_view
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +38,13 @@ def load_icon():
 ICON = load_icon()
 st.set_page_config(page_title=APP_NAME, page_icon=ICON if ICON is not None else "📈", layout="wide",
                    initial_sidebar_state="collapsed")
+
+# 一部のファイルだけ古いままアップロードされていると、分かりにくいエラーになるので、先に確認して知らせる
+if getattr(mw, "API_VERSION", 0) < 3 or getattr(gesture_view, "GV_VERSION", 0) < 3:
+    st.error("ファイルの版が揃っていません。GitHub の app.py / mathplot_web.py / gesture_view.py / mathplot_core.py を、"
+             "すべて最新版にそろえてアップロードしてください。"
+             f"（mathplot_web.py: 版{getattr(mw, 'API_VERSION', '古い')}、gesture_view.py: 版{getattr(gesture_view, 'GV_VERSION', '古い')}、必要: 3以上）")
+    st.stop()
 
 # ======================= 見た目: 元のデスクトップ版に近いシンプルな配色・形 =======================
 st.markdown("""
@@ -465,6 +473,11 @@ def build_graph(play):
             for i, e in enumerate(errs):
                 if e:
                     st.caption(f":red[式 {i + 1}: {e}]")
+            if ss.get("showinfo"):
+                L_ = mw.LAST
+                st.caption(f"動作情報: {'下書き(軽量JPEG)' if L_.get('kind') == 'jpeg' else '高画質(PNG)'} / "
+                           f"{L_.get('kb', 0):.0f}KB / {L_.get('ms', 0):.0f}ms / 解像度{L_.get('dpi')}dpi / "
+                           f"同じ内容の使い回し: {'あり' if L_.get('memo') else 'なし'} / 3Dの図の使い回し: {'あり' if L_.get('geo') else 'なし'}")
         except Exception as ex:
             st.error(f"描画できませんでした: {ex}")
         param_bars(state)
@@ -486,6 +499,7 @@ def build_graph(play):
                 st.slider("見る角度 (上下)", -90.0, 90.0, step=1.0, format="%.0f", key="elev")
                 st.slider("見る角度 (回転)", -180.0, 180.0, step=1.0, format="%.0f", key="azim")
             st.slider("グラフの縦の長さ", 0.5, 1.3, step=0.05, key="hfac")
+            st.checkbox("動作情報を表示 (軽量描画の確認用)", key="showinfo")
             if png is not None:
                 st.download_button("グラフを画像(PNG)で保存", data=png, file_name="graph.png", mime="image/png")
         # 再生の ON/OFF が切り替わった / 式の入力欄にも関わる変更があったときは、全体を再実行

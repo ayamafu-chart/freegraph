@@ -5,7 +5,7 @@ mathplot_core.py（数式の解析・描画ロジック）を、PySide6(GUI)な�
 """
 import os
 os.environ.setdefault("MPS_NOGUI", "1")      # mathplot_core の GUI(PySide6) 部分を読み込まない
-import io, re, json, hashlib, threading
+import io, re, json, time, hashlib, threading
 from collections import OrderedDict
 import numpy as np
 import matplotlib
@@ -14,6 +14,8 @@ from matplotlib.figure import Figure
 from types import SimpleNamespace
 import mathplot_core as core
 
+API_VERSION = 3          # app.py と組み合わせが合っているかの確認用 (古い版が混ざると app.py が教えてくれる)
+LAST = {}                # 直近の描画の情報 (画面の「動作情報」に表示する)
 LOCK = threading.RLock()        # core は共有のグローバル状態を持つので、同時アクセスを直列化する
 SPACES = core.SPACES
 SPACE_NAMES = list(SPACES)
@@ -161,6 +163,7 @@ def analyze(state):
 
 
 # ---------------- 描画 ----------------
+_info = {"geo": False}
 _geo = {}          # 3D: 直近に描いた図。視点(elev/azim)だけが違うなら、データの計算をやり直さず視点だけ変えて保存する
 
 
@@ -181,10 +184,12 @@ def _render(state, w_in, h_in, dpi, jpeg):
     """グラフを画像のバイト列にして返す。戻り値: (画像, 行ごとのエラー文字列のリスト, 実際に使った軸範囲)"""
     with LOCK:
         S = SPACES[state["space"]]; dim = S["dim"]; tz = S.get("tz"); gk = None
+        _info["geo"] = False
         if dim == 3:                                      # 視点以外が同じなら、前回の図を使い回す
             gk = hashlib.md5(json.dumps([{k: v for k, v in state.items() if k not in ("elev", "azim")}, w_in, h_in],
                                         sort_keys=True, default=str).encode("utf-8")).hexdigest()
             if _geo.get("key") == gk:
+                _info["geo"] = True
                 return _finish3d(*_geo["v"], state, dpi, jpeg)
         names, derrs = prepare(state)
         params = state["params"]; allp = ["t"] + names
@@ -248,16 +253,19 @@ _memo = OrderedDict()          # 直近の描画結果。同じ内容の再描�
 def render(state, w_in=8.0, h_in=7.0, dpi=130, draft=False):
     """グラフを描く。draft=True なら回転中・再生中向けの軽い画像 (低解像度のJPEG)。
     戻り値: (画像バイト列, 行ごとのエラー, 実際に使った軸範囲, 画像の種類 "png"/"jpeg", 内容を表すキー)"""
+    t0 = time.perf_counter()
     jpeg = bool(draft)
     if draft: dpi = min(dpi, 72)
     key = hashlib.md5(json.dumps([state, w_in, h_in, dpi, jpeg], sort_keys=True, default=str).encode("utf-8")).hexdigest()
     with LOCK:
         if key in _memo:
-            _memo.move_to_end(key); r = _memo[key]
+            _memo.move_to_end(key); r = _memo[key]; hit = True
         else:
-            r = _render(state, w_in, h_in, dpi, jpeg)
+            r = _render(state, w_in, h_in, dpi, jpeg); hit = False
             _memo[key] = r
             while len(_memo) > 6: _memo.popitem(last=False)
+        LAST.update(kind="jpeg" if jpeg else "png", kb=len(r[0]) / 1024, ms=(time.perf_counter() - t0) * 1000,
+                    memo=hit, geo=(False if hit else _info["geo"]), dpi=dpi)
     return r[0], r[1], r[2], ("jpeg" if jpeg else "png"), key
 
 

@@ -14,6 +14,8 @@ import tempfile
 
 import streamlit.components.v1 as components
 
+GV_VERSION = 3            # app.py と組み合わせが合っているかの確認用
+
 _HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
