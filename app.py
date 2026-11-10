@@ -72,6 +72,11 @@ input, textarea, select, [data-baseweb="select"] * {font-size: 17px !important;}
     min-width: 0 !important; flex: 1 1 0 !important; width: auto !important;}
 .st-key-keypad button, .st-key-toolbar button, .st-key-kpnav button {width: 100%; padding: 0 !important; font-size: 17px;}
 h3 {margin: 0; padding: 0;}
+/* 式カードの「色・太さ・▲▼」の行は折り返さず横一列 */
+[data-testid="stHorizontalBlock"]:has([class*="st-key-up_"]) {flex-wrap: nowrap !important; gap: .25rem !important;}
+[data-testid="stHorizontalBlock"]:has([class*="st-key-up_"]) > [data-testid="stColumn"],
+[data-testid="stHorizontalBlock"]:has([class*="st-key-up_"]) > [data-testid="column"] {min-width: 0 !important;}
+[class*="st-key-up_"] button, [class*="st-key-dn_"] button {width: 100%; padding: 0 !important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -217,6 +222,15 @@ def apply_dict(d):
 # --- ボタンから呼ばれる処理 (コールバック: 画面の再描画より前に実行される) ---
 def set_active(rid): ss.active = rid
 def rm_row(rid): ss.rows = [r for r in ss.rows if r["id"] != rid]
+
+
+def move_row(rid, step):
+    """式を上(-1)/下(+1)へ入れ替える。入力内容はIDで管理しているので、見た目の順序だけが変わる"""
+    ids = [r["id"] for r in ss.rows]
+    i = ids.index(rid)
+    j = i + step
+    if 0 <= j < len(ids):
+        ss.rows[i], ss.rows[j] = ss.rows[j], ss.rows[i]
 def mark_full(): ss._need_full = True              # 式の入力欄にも関わる変更 → 画面全体を作り直す
 def rm_param(pid): ss.params = [p for p in ss.params if p["id"] != pid]; mark_full()
 def add_param_cb(): add_param(); mark_full()
@@ -287,7 +301,7 @@ def handle_gesture():
     try:
         if g["type"] == "rot" and S["dim"] == 3:
             ss.azim = (float(ss.get("azim", -60.0)) - float(g["dx"]) * 240.0 + 180.0) % 360.0 - 180.0
-            ss.elev = max(-90.0, min(90.0, float(ss.get("elev", 25.0)) - float(g["dy"]) * 240.0))
+            ss.elev = max(-90.0, min(90.0, float(ss.get("elev", 25.0)) + (-1.0 if ss.get("inv_rot") else 1.0) * float(g["dy"]) * 240.0))
             return
         if g["type"] == "view" and S["dim"] == 2:
             base = ss.get("_eff") or [float(ss[f"lim{i}"]) for i in range(6)]
@@ -318,11 +332,13 @@ def row_editor(previews):
                 st.caption(f":red[{err}]")
             elif tex:
                 st.latex(tex)
-            d1, d2, d3 = st.columns([2, 3, 4], vertical_alignment="center")
+            d1, d2, d3, d4, d5 = st.columns([2, 3, 2, 1.2, 1.2], vertical_alignment="center")
             with d1.popover("色"):
                 st.color_picker("色", key=f"col_{rid}")
             d2.number_input("太さ", 0.5, 12.0, step=0.5, format="%.2f", key=f"lw_{rid}")
             d3.markdown(f"<span style='color:{ss.get(f'col_{rid}', '#999')};font-size:26px'>━━</span>", unsafe_allow_html=True)
+            d4.button("▲", key=f"up_{rid}", on_click=move_row, args=(rid, -1), disabled=(idx == 0), help="この式を上へ")
+            d5.button("▼", key=f"dn_{rid}", on_click=move_row, args=(rid, 1), disabled=(idx == len(ss.rows) - 1), help="この式を下へ")
     st.button("＋ 式を追加", key="add_row", on_click=kp_action, args=("new",))
 
 
@@ -498,6 +514,7 @@ def build_graph(play):
             if dim3:
                 st.slider("見る角度 (上下)", -90.0, 90.0, step=1.0, format="%.0f", key="elev")
                 st.slider("見る角度 (回転)", -180.0, 180.0, step=1.0, format="%.0f", key="azim")
+                st.checkbox("上下の回転の向きを反対にする", key="inv_rot", help="上へスワイプしたときの回る向きが合わないときに切り替えます")
             st.slider("グラフの縦の長さ", 0.5, 1.3, step=0.05, key="hfac")
             st.checkbox("動作情報を表示 (軽量描画の確認用)", key="showinfo")
             if png is not None:
